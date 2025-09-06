@@ -1,72 +1,55 @@
-const supabase = require('../dbConnection.js');
+// model/addMfaToken.js
+const supabase = require("../dbConnection");
 
+// Insert a new MFA token row for a user
 async function addMfaToken(userId, token) {
-  try {
-    const currentDate = new Date();
-    const expiryDate = new Date(currentDate.getTime() + 10 * 60000); // 10 minutes
+  const expiry = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes TTL
 
-    // Ensure userId is stored as integer
-    const parsedUserId = parseInt(userId, 10);
+  const { error } = await supabase.from("mfatokens").insert({
+    user_id: userId,
+    token: String(token),
+    expiry,
+    is_used: false,
+  });
 
-    const { data, error } = await supabase
-      .from('mfatokens')
-      .insert({
-        user_id: parsedUserId,
-        token,
-        expiry: expiryDate.toISOString(),
-        is_used: false
-      });
-
-    if (error) throw error;
-    return data;
-  } catch (error) {
-    console.error("Error adding MFA token:", error);
+  if (error) {
+    console.error("[MFA] addMfaToken error:", error);
     throw error;
   }
+  return true;
 }
 
-async function verifyMfaToken(userId, token) {
-  try {
-    // Ensure userId is treated as integer here too
-    const parsedUserId = parseInt(userId, 10);
+// Verify a token for a user
+async function verifyMfaToken(userId, tokenAttempt) {
+  const { data, error } = await supabase
+    .from("mfatokens")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("is_used", false)
+    .order("id", { ascending: false }) // newest first
+    .limit(1)
+    .single();
 
-    const { data, error } = await supabase
-      .from('mfatokens')
-      .select('id, token, expiry, is_used')
-      .eq('user_id', parsedUserId)
-      .eq('token', token)
-      .eq('is_used', false)
-      .order('expiry', { ascending: false })
-      .limit(1);
-
-    if (error) throw error;
-
-    const mfaToken = data?.[0];
-    if (!mfaToken) {
-      console.log("❌ No valid token found for user:", parsedUserId, "token:", token);
-      return false;
-    }
-
-    // Check expiry BEFORE updating
-    const now = new Date();
-    const expiryDate = new Date(mfaToken.expiry);
-    if (now > expiryDate) {
-      console.log("❌ Token expired. Expiry:", expiryDate, "Now:", now);
-      return false;
-    }
-
-    // Mark token as used
-    await supabase
-      .from('mfatokens')
-      .update({ is_used: true })
-      .eq('id', mfaToken.id);
-
-    console.log("✅ Token validated successfully for user:", parsedUserId);
-    return true;
-  } catch (error) {
-    console.error("Error verifying MFA token:", error);
-    throw error;
+  if (error || !data) {
+    console.warn("❌ No valid token found for user:", userId, "token:", tokenAttempt);
+    return false;
   }
+
+  if (new Date(data.expiry).getTime() < Date.now()) {
+    console.warn("❌ MFA token expired for user:", userId);
+    return false;
+  }
+
+  if (String(data.token) !== String(tokenAttempt)) {
+    console.warn("❌ MFA token mismatch for user:", userId);
+    return false;
+  }
+
+  // ✅ Mark token as used (one-time use)
+  await supabase.from("mfatokens").update({ is_used: true }).eq("id", data.id);
+
+  console.log("✅ MFA token verified for user:", userId);
+  return true;
 }
 
 module.exports = { addMfaToken, verifyMfaToken };
