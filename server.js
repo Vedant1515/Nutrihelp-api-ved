@@ -13,8 +13,8 @@ const path = require("path");
 // routes
 const uploadRoutes = require("./routes/uploadRoutes");
 const systemRoutes = require("./routes/systemRoutes");
-const routes = require("./routes");               // your main router index
-const signupRoute = require("./routes/signup");   // signup router
+const routes = require("./routes");             // your main router index (mount under /api inside)
+const signupRoute = require("./routes/signup"); // signup router
 
 // ----- directories (ensure uploads and temp exist) -----
 const uploadsDir = path.join(__dirname, "uploads");
@@ -44,8 +44,6 @@ function cleanupOldFiles() {
 
   try {
     const tempFiles = fs.readdirSync(tempDir);
-    console.log(`Checking ${tempFiles.length} temporary files for cleanup`);
-
     let deletedCount = 0;
     tempFiles.forEach((file) => {
       const filePath = path.join(tempDir, file);
@@ -59,7 +57,6 @@ function cleanupOldFiles() {
         console.error(`Error checking file ${filePath}:`, err);
       }
     });
-
     if (deletedCount > 0) {
       console.log(`Cleaned up ${deletedCount} old temporary files`);
     }
@@ -67,7 +64,6 @@ function cleanupOldFiles() {
     console.error("Error during file cleanup:", err);
   }
 }
-
 cleanupOldFiles();
 setInterval(cleanupOldFiles, 3 * 60 * 60 * 1000);
 
@@ -77,18 +73,34 @@ app.set("trust proxy", 1);
 
 // ----- env and port -----
 const PORT = process.env.PORT || 10000;
-const ALLOWED_ORIGINS = [
-  "https://nutrihelp-web.vercel.app",
+
+// You can set a comma-separated list in FRONTEND_ORIGINS to allow specific sites
+// Example: FRONTEND_ORIGINS="https://nutrihelpfrontend.vercel.app,https://yourdomain.com"
+const EXTRA_ORIGINS = (process.env.FRONTEND_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// Local dev defaults
+const ALLOWED_ORIGINS = new Set([
   "http://localhost:3000",
-];
+  "http://localhost:5173",
+  ...EXTRA_ORIGINS,
+]);
+
+// Allow any preview on vercel.app (project-name-randomhash.vercel.app)
+const allowVercelPreview = (origin) =>
+  /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin || "");
 
 // ----- CORS -----
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow server to server or curl with no origin
+      // allow server-to-server or curl with no Origin
       if (!origin) return cb(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      if (ALLOWED_ORIGINS.has(origin) || allowVercelPreview(origin)) {
+        return cb(null, true);
+      }
       return cb(new Error(`CORS blocked for origin: ${origin}`));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -98,14 +110,31 @@ app.use(
 );
 app.options("*", cors());
 
-// ----- security headers -----
+// ----- security headers (Helmet CSP) -----
+const apiOrigin =
+  process.env.RENDER_EXTERNAL_URL || "https://nutrihelp-api-ved.onrender.com";
+
 app.use(
   helmet({
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
-        styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://cdn.jsdelivr.net",
+          "https://cdnjs.cloudflare.com",
+        ],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://fonts.googleapis.com",
+          "https://cdn.jsdelivr.net",
+          "https://cdnjs.cloudflare.com",
+        ],
+        fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
+        imgSrc: ["'self'", "data:", "blob:"],
+        connectSrc: ["'self'", apiOrigin, "https://*.vercel.app"],
         objectSrc: ["'none'"],
       },
     },
@@ -148,15 +177,16 @@ app.get("/api/health", (req, res) => {
 });
 
 // ----- swagger -----
-const swaggerDocument = yaml.load("./index.yaml");
+const swaggerDocument = yaml.load(path.join(__dirname, "index.yaml"));
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
-// ----- routes -----
+// ----- routes (mount under /api) -----
 app.use("/api/system", systemRoutes);
-routes(app);                    // make sure routes mount under /api inside this file
+routes(app);                 // ensure everything this mounts is using /api/... inside routes/index.js
 app.use("/api", uploadRoutes);
 app.use("/api/signup", signupRoute);
 
+// static files
 app.use("/uploads", express.static("uploads"));
 
 // ----- error handlers -----
