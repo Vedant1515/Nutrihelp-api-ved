@@ -90,13 +90,36 @@ const login = async (req, res) => {
 
     // MFA handling
     if (user.mfa_enabled) {
-      const token = crypto.randomInt(100000, 999999);
-      await addMfaToken(user.user_id, token);
-      await sendOtpEmail(user.email, token);
-      return res.status(202).json({
-        message: "An MFA Token has been sent to your email address"
-      });
+  // 6-digit code
+  const token = crypto.randomInt(100000, 999999);
+
+  console.log("[MFA] Generating token", token, "for user:", user.user_id, "email:", user.email);
+
+  try {
+    // Persist token to Supabase
+    await addMfaToken(user.user_id, token);
+    console.log("[MFA] Token persisted successfully for user:", user.user_id);
+
+    // Send email
+    await sendOtpEmail(user.email, token);
+    console.log("[MFA] OTP email requested via SendGrid for", user.email);
+
+    // Optionally show in logs while testing
+    if (process.env.DEV_RETURN_MFA === "1") {
+      console.warn("[DEV ONLY] MFA code for", user.email, "=", token);
     }
+
+    return res.status(202).json({
+      message: "An MFA Token has been sent to your email address"
+    });
+  } catch (err) {
+    console.error("[MFA] Error issuing token for", user.user_id, ":", err);
+    return res.status(500).json({
+      error: "Failed to issue MFA token"
+    });
+  }
+}
+
 
     await logLoginEvent({
       userId: user.user_id,
@@ -174,19 +197,18 @@ const loginMfa = async (req, res) => {
 // ✅ Send OTP email via SendGrid
 async function sendOtpEmail(email, token) {
   try {
-    await sgMail.send({
+    const [resp] = await sgMail.send({
       to: email,
       from: process.env.SENDGRID_FROM,
       subject: "NutriHelp Login Token",
       text: `Your token to log in is ${token}`,
       html: `Your token to log in is <strong>${token}</strong>`
     });
-    console.log("OTP email sent successfully to", email);
+    console.log("OTP email send status:", resp?.statusCode); // expect 202
   } catch (err) {
     console.error("Error sending OTP email:", err.response?.body || err.message);
   }
 }
-
 // ✅ Send failed login alert via SendGrid
 async function sendFailedLoginAlert(email, ip) {
   try {

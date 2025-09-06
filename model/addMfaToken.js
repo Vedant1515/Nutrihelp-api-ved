@@ -1,54 +1,71 @@
 // model/addMfaToken.js
 const supabase = require("../dbConnection");
 
-// Insert a new MFA token row for a user
 async function addMfaToken(userId, token) {
-  const expiry = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes TTL
-
-  const { error } = await supabase.from("mfatokens").insert({
-    user_id: userId,
+  const expiry = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min
+  const payload = {
+    user_id: Number(userId),   // ensure numeric for your int8 column
     token: String(token),
     expiry,
     is_used: false,
-  });
+  };
+
+  console.log("[MFA] addMfaToken inserting:", payload);
+
+  const { data, error } = await supabase
+    .from("mfatokens")
+    .insert(payload)
+    .select();
 
   if (error) {
-    console.error("[MFA] addMfaToken error:", error);
+    console.error("[MFA] addMfaToken insert ERROR:", error);
     throw error;
   }
+
+  console.log("[MFA] addMfaToken insert OK:", data);
   return true;
 }
 
-// Verify a token for a user
 async function verifyMfaToken(userId, tokenAttempt) {
+  console.log("[MFA] verifyMfaToken check:", { userId, tokenAttempt });
+
   const { data, error } = await supabase
     .from("mfatokens")
     .select("*")
-    .eq("user_id", userId)
+    .eq("user_id", Number(userId))
     .eq("is_used", false)
-    .order("id", { ascending: false }) // newest first
+    .order("id", { ascending: false })
     .limit(1)
-    .single();
+    .maybeSingle();
 
-  if (error || !data) {
-    console.warn("❌ No valid token found for user:", userId, "token:", tokenAttempt);
+  if (error) {
+    console.error("[MFA] verifyMfaToken select ERROR:", error);
+    return false;
+  }
+
+  if (!data) {
+    console.warn("❌ No token row for user:", userId);
     return false;
   }
 
   if (new Date(data.expiry).getTime() < Date.now()) {
-    console.warn("❌ MFA token expired for user:", userId);
+    console.warn("❌ Token expired for user:", userId);
     return false;
   }
 
   if (String(data.token) !== String(tokenAttempt)) {
-    console.warn("❌ MFA token mismatch for user:", userId);
+    console.warn("❌ Token mismatch for user:", userId, "expected:", data.token, "got:", tokenAttempt);
     return false;
   }
 
-  // ✅ Mark token as used (one-time use)
-  await supabase.from("mfatokens").update({ is_used: true }).eq("id", data.id);
+  const { error: updErr } = await supabase
+    .from("mfatokens")
+    .update({ is_used: true })
+    .eq("id", data.id);
 
-  console.log("✅ MFA token verified for user:", userId);
+  if (updErr) console.error("[MFA] mark used ERROR:", updErr);
+  else console.log("✅ Token verified & marked used for user:", userId);
+
   return true;
 }
 
