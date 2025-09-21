@@ -1,3 +1,5 @@
+// controllers/logincontroller.js
+
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const logLoginEvent = require("../Monitor_&_Logging/loginLogger");
@@ -8,14 +10,12 @@ const crypto = require("crypto");
 const supabase = require("../dbConnection");
 const { validationResult } = require("express-validator");
 
-// ✅ Set SendGrid API key once globally
+// Set SendGrid API key once globally
 sgMail.setApiKey(process.env.SENDGRID_KEY);
 
 const login = async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const email = req.body.email?.trim().toLowerCase();
   const password = req.body.password;
@@ -30,7 +30,7 @@ const login = async (req, res) => {
   const tenMinutesAgoISO = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
   try {
-    // Count failed login attempts
+    // Count failed login attempts in last 10 minutes
     const { data: failuresByEmail } = await supabase
       .from("brute_force_logs")
       .select("id")
@@ -42,13 +42,15 @@ const login = async (req, res) => {
 
     if (failureCount >= 10) {
       return res.status(429).json({
-        error: "❌ Too many failed login attempts. Please try again after 10 minutes."
+        error: "Too many failed login attempts. Please try again after 10 minutes."
       });
     }
 
     // Validate credentials
-    const user = await getUserCredentials(email);
-    const userExists = user && user.length !== 0;
+    let user = await getUserCredentials(email);
+    if (Array.isArray(user)) user = user[0];
+    const userExists = !!user;
+
     const isPasswordValid = userExists ? await bcrypt.compare(password, user.password) : false;
     const isLoginValid = userExists && isPasswordValid;
 
@@ -62,64 +64,56 @@ const login = async (req, res) => {
 
       if (failureCount === 4) {
         return res.status(429).json({
-          warning: "⚠ You have one attempt left before your account is temporarily locked."
+          warning: "You have one attempt left before your account is temporarily locked."
         });
       }
 
-      if (!userExists || !isPasswordValid) {
-        await sendFailedLoginAlert(email, clientIp);
+      await sendFailedLoginAlert(email, clientIp);
 
-        if (!userExists) {
-          return res.status(401).json({ error: "Invalid email" });
-        }
-
-        return res.status(401).json({ error: "Invalid password" });
-      }
+      if (!userExists) return res.status(401).json({ error: "Invalid email" });
+      return res.status(401).json({ error: "Invalid password" });
     }
 
-    // Log successful login attempt
+    // Log successful attempt and clear previous failures
     await supabase.from("brute_force_logs").insert([{
       email,
+      ip_address: clientIp,
       success: true,
       created_at: new Date().toISOString()
     }]);
 
-    await supabase.from("brute_force_logs").delete()
+    await supabase.from("brute_force_logs")
+      .delete()
       .eq("email", email)
       .eq("success", false);
 
     // MFA handling
     if (user.mfa_enabled) {
-  // 6-digit code
-  const token = crypto.randomInt(100000, 999999);
+      const token = crypto.randomInt(100000, 999999);
+      console.log("[MFA] Generating token", token, "for user:", user.user_id, "email:", user.email);
 
-  console.log("[MFA] Generating token", token, "for user:", user.user_id, "email:", user.email);
+      try {
+        // Persist token to DB
+        await addMfaToken(user.user_id, token);
+        console.log("[MFA] Token persisted for user:", user.user_id);
 
-  try {
-    // Persist token to Supabase
-    await addMfaToken(user.user_id, token);
-    console.log("[MFA] Token persisted successfully for user:", user.user_id);
+        // Send email (throws on failure)
+        await sendOtpEmail(user.email, token);
+        console.log("[MFA] SendGrid accepted message for", user.email);
 
-    // Send email
-    await sendOtpEmail(user.email, token);
-    console.log("[MFA] OTP email requested via SendGrid for", user.email);
+        if (process.env.DEV_RETURN_MFA === "1") {
+          console.warn("[DEV ONLY] MFA code for", user.email, "=", token);
+        }
 
-    // Optionally show in logs while testing
-    if (process.env.DEV_RETURN_MFA === "1") {
-      console.warn("[DEV ONLY] MFA code for", user.email, "=", token);
+        // 202 Accepted: client should continue with /login/mfa
+        return res.status(202).json({
+          message: "An MFA Token has been sent to your email address"
+        });
+      } catch (err) {
+        console.error("[MFA] Error issuing token for", user.user_id, ":", err?.message || err);
+        return res.status(500).json({ error: "Failed to issue MFA token" });
+      }
     }
-
-    return res.status(202).json({
-      message: "An MFA Token has been sent to your email address"
-    });
-  } catch (err) {
-    console.error("[MFA] Error issuing token for", user.user_id, ":", err);
-    return res.status(500).json({
-      error: "Failed to issue MFA token"
-    });
-  }
-}
-
 
     await logLoginEvent({
       userId: user.user_id,
@@ -128,9 +122,10 @@ const login = async (req, res) => {
       userAgent: req.headers["user-agent"]
     });
 
-    // ✅ RBAC-aware JWT generation
+    // RBAC-aware JWT with explicit type for middleware
     const token = jwt.sign(
-      { 
+      {
+        type: "access",
         userId: user.user_id,
         role: user.user_roles?.role_name || "unknown"
       },
@@ -139,7 +134,6 @@ const login = async (req, res) => {
     );
 
     return res.status(200).json({ user, token });
-
   } catch (err) {
     console.error("Login error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -148,9 +142,7 @@ const login = async (req, res) => {
 
 const loginMfa = async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const email = req.body.email?.trim().toLowerCase();
   const password = req.body.password;
@@ -161,8 +153,9 @@ const loginMfa = async (req, res) => {
   }
 
   try {
-    const user = await getUserCredentials(email);
-    if (!user || user.length === 0) {
+    let user = await getUserCredentials(email);
+    if (Array.isArray(user)) user = user[0];
+    if (!user) {
       return res.status(401).json({ error: "Invalid email or password" });
     }
 
@@ -176,9 +169,10 @@ const loginMfa = async (req, res) => {
       return res.status(401).json({ error: "Token is invalid or has expired" });
     }
 
-    // ✅ RBAC-aware JWT
+    // RBAC-aware JWT with explicit type for middleware
     const token = jwt.sign(
-      { 
+      {
+        type: "access",
         userId: user.user_id,
         role: user.user_roles?.role_name || "unknown"
       },
@@ -187,29 +181,29 @@ const loginMfa = async (req, res) => {
     );
 
     return res.status(200).json({ user, token });
-
   } catch (err) {
     console.error("MFA login error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 };
 
-// ✅ Send OTP email via SendGrid
+// Send OTP email via SendGrid (throws on failure)
 async function sendOtpEmail(email, token) {
-  try {
-    const [resp] = await sgMail.send({
-      to: email,
-      from: process.env.SENDGRID_FROM,
-      subject: "NutriHelp Login Token",
-      text: `Your token to log in is ${token}`,
-      html: `Your token to log in is <strong>${token}</strong>`
-    });
-    console.log("OTP email send status:", resp?.statusCode); // expect 202
-  } catch (err) {
-    console.error("Error sending OTP email:", err.response?.body || err.message);
+  const [resp] = await sgMail.send({
+    to: email,
+    from: process.env.SENDGRID_FROM,
+    subject: "NutriHelp Login Token",
+    text: `Your token to log in is ${token}`,
+    html: `Your token to log in is <strong>${token}</strong>`
+  });
+  const code = resp?.statusCode;
+  console.log("[MFA] SendGrid status:", code);
+  if (code !== 202) {
+    throw new Error(`SendGrid did not accept the message. status=${code}`);
   }
 }
-// ✅ Send failed login alert via SendGrid
+
+// Send failed login alert via SendGrid (non-fatal on failure)
 async function sendFailedLoginAlert(email, ip) {
   try {
     await sgMail.send({

@@ -1,21 +1,19 @@
 // model/addMfaToken.js
+
 const supabase = require("../dbConnection");
 
 async function addMfaToken(userId, token) {
-  const expiry = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min
+  const expiry = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
   const payload = {
-    user_id: Number(userId),   // ensure numeric for your int8 column
+    user_id: Number(userId),
     token: String(token),
     expiry,
-    is_used: false,
+    is_used: false
   };
 
   console.log("[MFA] addMfaToken inserting:", payload);
 
-  const { data, error } = await supabase
-    .from("mfatokens")
-    .insert(payload)
-    .select();
+  const { data, error } = await supabase.from("mfatokens").insert(payload).select();
 
   if (error) {
     console.error("[MFA] addMfaToken insert ERROR:", error);
@@ -44,17 +42,24 @@ async function verifyMfaToken(userId, tokenAttempt) {
   }
 
   if (!data) {
-    console.warn("❌ No token row for user:", userId);
+    console.warn("No token row for user:", userId);
     return false;
   }
 
   if (new Date(data.expiry).getTime() < Date.now()) {
-    console.warn("❌ Token expired for user:", userId);
+    console.warn("Token expired for user:", userId);
     return false;
   }
 
   if (String(data.token) !== String(tokenAttempt)) {
-    console.warn("❌ Token mismatch for user:", userId, "expected:", data.token, "got:", tokenAttempt);
+    console.warn(
+      "Token mismatch for user:",
+      userId,
+      "expected:",
+      data.token,
+      "got:",
+      tokenAttempt
+    );
     return false;
   }
 
@@ -64,7 +69,7 @@ async function verifyMfaToken(userId, tokenAttempt) {
     .eq("id", data.id);
 
   if (updErr) console.error("[MFA] mark used ERROR:", updErr);
-  else console.log("✅ Token verified & marked used for user:", userId);
+  else console.log("Token verified and marked used for user:", userId);
 
   return true;
 }
